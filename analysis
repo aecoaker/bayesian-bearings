@@ -1,12 +1,14 @@
 library(ggmap)
+library(mvtnorm)
 
-#set reference points Nelson's column, London eye and Big ben
-#produce map of these and their bearings
+#set reference points & bearings Nelson's column, London eye and Big ben
 landmarks<-data.frame(lon=c(-0.128006, -0.119500, -0.124629),
                       lat=c(51.508065, 51.503294, 51.500795))
 alpha <- 19.4
 beta <- 101.1
 gamma <- 152.8
+
+#produce map of these and their bearings
 d <- seq(0, 0.4, 0.0001)
 line1 <- data.frame(lon=landmarks[1,1] + d*sin(alpha*pi/180+pi),
                     lat=landmarks[1,2] + d*cos(alpha*pi/180+pi))
@@ -23,31 +25,73 @@ bearingsPlot <- ggmap(map)+
   geom_line(aes(x=lon,y=lat),data=line3)
 bearingsPlot
 
+#define likelihood and prior functions to use in evaluation
 #assuming a reasonable wide prior for parameters
-#prior for lambda is uniform on -1 to 0
-#prior on theta is uniform on 51 to 52
-#prior for sigma is expo(20)
-#evaluate posterior over fine grid
-lambdagrid <- seq(-1,0,0.001)
-phigrid <- seq (51, 52, 0.001)
-posterior <- matrix(0,nrow=length(lambdagrid),ncol=length(phigrid))
-#evaluate the numerator p(D|θ)p(θ) over a fine grid over model parameters
-#bearing obs are indep so p(lambda,theta,sigma)=p(lambda)p(theta)p(sigma)
-#say p(lambda,theta,sigma)=1
-bearingAngle <- function(p1, p2) {
-  (360 + atan((p2[1]-p1[1]) / (p2[2]-p1[1])) * (180/pi)) %% 360
+bearing <- function (x1, y1, x2, y2) {
+  (360 * atan((x2-x1)/(y2-y1))*(180/pi))%%360
 }
-for (i in 1:nrow(posterior)) {
-  for (j in 1:ncol(posterior)) {
-    posterior[i,j] <- dnorm(alpha,bearingAngle(c(lambdagrid[i],phigrid[j]),
-                                         c(landmarks[1,1],landmarks[1,2])),10)*
-                      dnorm(beta,bearingAngle(c(lambdagrid[i],phigrid[j]),
-                                          c(landmarks[2,1],landmarks[2,2])),10)*
-                      dnorm(gamma,bearingAngle(c(lambdagrid[i],phigrid[j]),
-                                          c(landmarks[3,1],landmarks[3,2])),10)
+likelihood <- function (vector) {
+  lambda <- vector[1]
+  theta <- vector[2]
+  sigma <- vector[3]
+  dnorm(alpha, mean=bearing(lambda, theta, landmarks[1,1], landmarks[1,2]),
+               sd=sqrt(sigma)) *
+  dnorm(beta, mean=bearing(lambda, theta, landmarks[2,1], landmarks[2,2])) *
+  dnorm(gamma, mean=bearing(lambda, theta, landmarks[3,1], landmarks[3,2]))
+}
+prior <- function (vector) {
+  lambda <- vector[1]
+  theta <- vector[2]
+  sigma <- vector[3]
+  dunif(lambda, -1, 0)*dunif(theta,51,52)*dexp(sqrt(sigma),20)
+}
+
+#want to find best place to initialise simulation i.e near expected mode
+intersectBearings <- function(p1,b1,p2,b2) {
+  x1 <- p1[1]
+  x2 <- p1[1] + 0.1*sin(b1*pi/180)
+  x3 <- p2[1]
+  x4 <- p2[1] + 0.1*sin(b2*pi/180)
+  y1 <- p1[2]
+  y2 <- p1[2] + 0.1*cos(b1*pi/180)
+  y3 <- p2[2]
+  y4 <- p2[2] + 0.1*cos(b2*pi/180)
+  x <- ((x1*y2-y1*x2)*(x3-x4)-(x1-x2)*(x3*y4-y3*x4))/((x1-x2)*(y3-y4)-(y1-y2)*(x3-x4))
+  y <- ((x1*y2-y1*x2)*(y3-y4)-(y1-y2)*(x3*y4-y3*x4))/((x1-x2)*(y3-y4)-(y1-y2)*(x3-x4))
+  return(as.numeric(c(x,y)))
+}
+intersection <- intersectBearings(landmarks[1,],alpha,landmarks[2,],beta)
+
+#use this to generate draw with a sensible start
+draws <- array(0,dim=c(4000,3,3))
+draws[1,1,] <- runif(3,intersection[1] - 0.01, intersection[1] + 0.01)
+draws[1,2,] <- runif(3,intersection[2] - 0.01, intersection[2] + 0.01)
+draws[1,3,] <- rexp(3,20)
+
+#evaluate posterior by sampling using M-H algorithm
+accepted <- rep(1,3)
+for (step in 2:4000) {
+  for (chain in 1:3) {
+    #beginning with arbitrary proposal
+    prop.cov <- c(1e-8,1e-8,1e-4)*diag(3)
+    proposed <- rmvnorm(1,draws[step-1,,chain],prop.cov)
+    r <- likelihood(proposed)*prior(proposed)/
+      (likelihood(draws[step-1,,chain])*prior(draws[step-1,,chain]))
+    #loop not running rn because denom here is returning 0
+    #don't think it ever should
+    #need to figure out what it should be representing
+    #and what mistake is causing it to show zero
+    alpha <- min(1,r)
+    u <- runif(1)
+    if (u < alpha) {
+      draws[step,,chain] <- proposed
+      accepted[chain] <- accepted[chain]+1
+    } else {
+      draws[step,,chain] <- draws[step-1,,chain]
+    }
   }
 }
-sample <- array(posterior)
+
 
 
 #assume proximity to a road
