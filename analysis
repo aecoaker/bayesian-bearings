@@ -1,12 +1,15 @@
 library(ggmap)
 library(mvtnorm)
+library(geosphere)
 
 #set reference points & bearings Nelson's column, London eye and Big ben
-landmarks<-data.frame(lon=c(-0.128006, -0.119500, -0.124629),
-                      lat=c(51.508065, 51.503294, 51.500795))
-alpha <- 19.4
-beta <- 101.1
-gamma <- 152.8
+landmarks<-data.frame(lon=c(-0.12790934620440858, -0.11964167814801072,
+                            -0.1245496367169894),
+                      lat=c(51.50779711415662, 51.50345826867559, 
+                            51.5008340546969))
+alpha <- 9.54
+beta <- 116.04
+gamma <- 155.43
 
 #produce map of these and their bearings
 d <- seq(0, 0.4, 0.0001)
@@ -27,23 +30,26 @@ bearingsPlot
 
 #define likelihood and prior functions to use in evaluation
 #assuming a reasonable wide prior for parameters
-bearing <- function (x1, y1, x2, y2) {
-  (360 * atan((x2-x1)/(y2-y1))*(180/pi))%%360
+bearing_360 <- function(p1, p2) {
+  bearing_180 <- bearing(p1, p2)
+  if (bearing_180 < 0){
+    return(360+bearing_180)
+  } else{
+    return(bearing_180)
+  }
 }
-likelihood <- function (vector) {
-  lambda <- vector[1]
-  theta <- vector[2]
-  sigma <- vector[3]
-  dnorm(alpha, mean=bearing(lambda, theta, landmarks[1,1], landmarks[1,2]),
-               sd=sqrt(sigma)) *
-  dnorm(beta, mean=bearing(lambda, theta, landmarks[2,1], landmarks[2,2])) *
-  dnorm(gamma, mean=bearing(lambda, theta, landmarks[3,1], landmarks[3,2]))
+likelihood <- function (params) {
+  point <- params[1:2]
+  sigma <- params[3]
+  dnorm(alpha, mean=bearing_360(point, landmarks[1,]),sd=sqrt(sigma)) *
+    dnorm(beta, mean=bearing_360(point, landmarks[2,]),sd=sqrt(sigma)) *
+    dnorm(gamma, mean=bearing_360(point, landmarks[3,]),sd=sqrt(sigma))
 }
-prior <- function (vector) {
-  lambda <- vector[1]
-  theta <- vector[2]
-  sigma <- vector[3]
-  dunif(lambda, -1, 0)*dunif(theta,51,52)*dexp(sqrt(sigma),20)
+prior <- function (params) {
+  theta <- params[1]
+  lambda <- params[2]
+  sigma <- params[3]
+  dunif(theta, -1, 0)*dunif(lambda,51,52)*dexp(sqrt(sigma),20)
 }
 
 #want to find best place to initialise simulation i.e near expected mode
@@ -61,8 +67,12 @@ intersectBearings <- function(p1,b1,p2,b2) {
   return(as.numeric(c(x,y)))
 }
 intersection <- intersectBearings(landmarks[1,],alpha,landmarks[2,],beta)
+bearingsPlot + geom_point(aes(intersection[1], intersection[2], col='red'))
 
 #use this to generate draw with a sensible start
+#first dimension is the iteration index
+#second dimension is the parameter index
+#third dimension is the chain index
 draws <- array(0,dim=c(4000,3,3))
 draws[1,1,] <- runif(3,intersection[1] - 0.01, intersection[1] + 0.01)
 draws[1,2,] <- runif(3,intersection[2] - 0.01, intersection[2] + 0.01)
@@ -81,9 +91,9 @@ for (step in 2:4000) {
     #don't think it ever should
     #need to figure out what it should be representing
     #and what mistake is causing it to show zero
-    alpha <- min(1,r)
+    a <- min(1,r)
     u <- runif(1)
-    if (u < alpha) {
+    if (u < a) {
       draws[step,,chain] <- proposed
       accepted[chain] <- accepted[chain]+1
     } else {
