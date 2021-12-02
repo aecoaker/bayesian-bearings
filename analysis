@@ -1,15 +1,18 @@
+library(geosphere)
 library(ggmap)
 library(mvtnorm)
-library(geosphere)
+library(coda)
+library(MASS)
+library(reshape2)
 
 #set reference points & bearings Nelson's column, London eye and Big ben
 landmarks<-data.frame(lon=c(-0.12790934620440858, -0.11964167814801072,
                             -0.1245496367169894),
                       lat=c(51.50779711415662, 51.50345826867559, 
                             51.5008340546969))
-alpha <- 9.54
-beta <- 116.04
-gamma <- 155.43
+alpha <- 19.54
+beta <- 106.04
+gamma <- 144.43
 
 #produce map of these and their bearings
 d <- seq(0, 0.4, 0.0001)
@@ -27,6 +30,13 @@ bearingsPlot <- ggmap(map)+
   geom_line(aes(x=lon,y=lat),data=line2) +
   geom_line(aes(x=lon,y=lat),data=line3)
 bearingsPlot
+zoom_map <- get_map(c(-0.128,51.5065),zoom=18,maptype="roadmap")
+bearingsPlot <- ggmap(zoom_map)+
+  geom_point(aes(x = lon, y = lat), size = 1, data = landmarks, alpha = .5) +
+  geom_line(aes(x=lon,y=lat),data=line1) +
+  geom_line(aes(x=lon,y=lat),data=line2) +
+  geom_line(aes(x=lon,y=lat),data=line3)
+bearingsPlot
 
 #define likelihood and prior functions to use in evaluation
 #assuming a reasonable wide prior for parameters
@@ -38,18 +48,19 @@ bearing_360 <- function(p1, p2) {
     return(bearing_180)
   }
 }
-likelihood <- function (params) {
+loglikelihood <- function (params) {
   point <- params[1:2]
   sigma <- params[3]
-  dnorm(alpha, mean=bearing_360(point, landmarks[1,]),sd=sqrt(sigma)) *
-    dnorm(beta, mean=bearing_360(point, landmarks[2,]),sd=sqrt(sigma)) *
-    dnorm(gamma, mean=bearing_360(point, landmarks[3,]),sd=sqrt(sigma))
+  dnorm(alpha, mean=bearing_360(point, landmarks[1,]),sd=sqrt(sigma), log=T) +
+    dnorm(beta, mean=bearing_360(point, landmarks[2,]),sd=sqrt(sigma), log=T) +
+    dnorm(gamma, mean=bearing_360(point, landmarks[3,]),sd=sqrt(sigma), log=T)
 }
-prior <- function (params) {
+logprior <- function (params) {
   theta <- params[1]
   lambda <- params[2]
   sigma <- params[3]
-  dunif(theta, -1, 0)*dunif(lambda,51,52)*dexp(sqrt(sigma),20)
+  dunif(theta, -1, 0, log=T) + dunif(lambda, 51, 52, log=T) + 
+    dexp(sigma, 20, log=T)
 }
 
 #want to find best place to initialise simulation i.e near expected mode
@@ -67,30 +78,33 @@ intersectBearings <- function(p1,b1,p2,b2) {
   return(as.numeric(c(x,y)))
 }
 intersection <- intersectBearings(landmarks[1,],alpha,landmarks[2,],beta)
-bearingsPlot + geom_point(aes(intersection[1], intersection[2], col='red'))
+bearingsPlot + geom_point(aes(intersection[1], intersection[2], col='red')) +
+  theme(legend.position = 'none')
 
 #use this to generate draw with a sensible start
-#first dimension is the iteration index
-#second dimension is the parameter index
-#third dimension is the chain index
-draws <- array(0,dim=c(4000,3,3))
-draws[1,1,] <- runif(3,intersection[1] - 0.01, intersection[1] + 0.01)
-draws[1,2,] <- runif(3,intersection[2] - 0.01, intersection[2] + 0.01)
-draws[1,3,] <- rexp(3,20)
+#dimensions are iteration index, parameter, chain
+#parameters are ordered lambda, theta, sigma
+draws <- array(0,dim=c(10000,3,3))
+draws[10000,1,] <- runif(3,intersection[1] - 0.01, intersection[1] + 0.01)
+draws[10000,2,] <- runif(3,intersection[2] - 0.01, intersection[2] + 0.01)
+draws[10000,3,] <- rexp(3,20)
 
 #evaluate posterior by sampling using M-H algorithm
+converged <- FALSE
+step <- 2
 accepted <- rep(1,3)
-for (step in 2:4000) {
+while (!all(converged)) {
+  draws[1,,] <- draws[10000,,]
   for (chain in 1:3) {
-    #beginning with arbitrary proposal
-    prop.cov <- c(1e-8,1e-8,1e-4)*diag(3)
-    proposed <- rmvnorm(1,draws[step-1,,chain],prop.cov)
-    r <- likelihood(proposed)*prior(proposed)/
-      (likelihood(draws[step-1,,chain])*prior(draws[step-1,,chain]))
-    #loop not running rn because denom here is returning 0
-    #don't think it ever should
-    #need to figure out what it should be representing
-    #and what mistake is causing it to show zero
+    prop.cov <- c(1e-8,1e-8,1e-3)*diag(3) #beginning with arbitrary proposal
+    proposed <- c(0,0,-1)
+    while (proposed[3] < 0) {
+      proposed <- rmvnorm(1,draws[step-1,,chain],prop.cov)
+    }
+    r <- loglikelihood(proposed) + 
+      logprior(proposed) -
+      loglikelihood(draws[step-1,,chain]) - 
+      logprior(draws[step-1,,chain])
     a <- min(1,r)
     u <- runif(1)
     if (u < a) {
@@ -100,8 +114,48 @@ for (step in 2:4000) {
       draws[step,,chain] <- draws[step-1,,chain]
     }
   }
+  step <- step + 1
+  if (step > 100) {
+    chainlist <- mcmc.list(Chain1=mcmc(draws[,,1]),
+                           Chain2=mcmc(draws[,,2]),
+                           Chain3=mcmc(draws[,,3]))
+    converged <- all((gelman.diag(chainlist)$psrf[,2])<1.2)
+  }
 }
 
+#plot chains visually to confirm convergence
+
+#now convergence is achieved, we begin collecting the final sample
+sample <- array(0,dim=c(25000,3,3))
+sample[1,,] <- draws[step-1,,]
+accepted <- rep(1,3)
+for (step in 2:25000) {
+  print(step)
+  for (chain in 1:3) {
+    prop.cov <- c(1e-8,1e-8,1e-4)*diag(3)
+    while (proposed[3] < 0) {
+      proposed <- rmvnorm(1,draws[step-1,,chain],prop.cov)
+    }
+    r <- loglikelihood(proposed) + 
+      logprior(proposed) -
+      loglikelihood(draws[step-1,,chain]) - 
+      logprior(draws[step-1,,chain])
+    a <- min(1,r)
+    u <- runif(1)
+    if (u < a) {
+      sample[step,,chain] <- proposed
+      accepted[chain] <- accepted[chain]+1
+    } else {
+      sample[step,,chain] <- sample[step-1,,chain]
+    }
+  }
+}
+
+#then need to consider adding the snippet to plot chains as being sampled
+
+
+
+#use given code to plot density estimate on bearingsmap
 
 
 #assume proximity to a road
